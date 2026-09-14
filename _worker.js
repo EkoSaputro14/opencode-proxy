@@ -1,7 +1,13 @@
 /**
  * OpenCode AI Proxy Worker
  * Cloudflare Worker yang mem-forward request ke opencode.ai
- * dengan IP Cloudflare, rotasi User-Agent, dan support streaming SSE.
+ * dengan IP Cloudflare, identitas opencode CLI, dan support streaming SSE.
+ *
+ * Catatan penting: Zen gateway hanya meloloskan request free model yang
+ * membawa User-Agent identifier opencode CLI (opencode/latest/<ver>/cli).
+ * UA browser (Chrome/Firefox) dianggap client anonim dan ditolak dengan
+ * 429 FreeUsageLimitError — jadi JANGAN pakai UA browser di sini.
+ * (inspirasi: ZeroHomer/dsh-opencode-zen-bypass)
  *
  * Target endpoints:
  *   - https://opencode.ai/zen/v1/chat/completions
@@ -13,45 +19,16 @@
 
 const TARGET_HOST = "opencode.ai";
 
-// Rotasi User-Agent untuk bypass fingerprint detection
-const USER_AGENTS = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-  "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0",
-];
-
-// Sec-CH-UA profiles untuk fingerprint rotation
-const CH_UA_PROFILES = [
-  {
-    "Sec-CH-UA": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="8"',
-    "Sec-CH-UA-Platform": '"Windows"',
-    "Sec-CH-UA-Mobile": "?0",
-  },
-  {
-    "Sec-CH-UA": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="8"',
-    "Sec-CH-UA-Platform": '"macOS"',
-    "Sec-CH-UA-Mobile": "?0",
-  },
-  {
-    "Sec-CH-UA": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="8"',
-    "Sec-CH-UA-Platform": '"Linux"',
-    "Sec-CH-UA-Mobile": "?0",
-  },
-  {
-    "Sec-CH-UA": '"Not/A)Brand";v="8", "Chromium";v="126", "Microsoft Edge";v="126"',
-    "Sec-CH-UA-Platform": '"Windows"',
-    "Sec-CH-UA-Mobile": "?0",
-  },
-  {
-    "Sec-CH-UA": '"Firefox";v="127"',
-    "Sec-CH-UA-Platform": '"Windows"',
-    "Sec-CH-UA-Mobile": "?0",
-  },
+// Identitas opencode CLI — rotasi antar versi patch agar terlihat seperti
+// banyak user CLI yang berbeda. Format wajib: opencode/latest/<ver>/cli
+// (akhiran /cli menandakan client CLI resmi; tanpa ini = 429).
+// Jaga daftar ini tetap sinkron dengan release terbaru opencode CLI:
+// https://github.com/sst/opencode/releases
+const OPENCODE_USER_AGENTS = [
+  "opencode/latest/1.18.30/cli",
+  "opencode/latest/1.18.29/cli",
+  "opencode/latest/1.18.28/cli",
+  "opencode/latest/1.18.18/cli",
 ];
 
 const CORS_HEADERS = {
@@ -60,6 +37,19 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
   "Access-Control-Max-Age": "86400",
 };
+
+// Header yang TIDAK BOLEH lolos ke upstream karena membocorkan identitas
+// client asli / tool chain di depan proxy (bisa memicu penolakan gateway).
+const BLOCKED_HEADERS = [
+  "user-agent",
+  "sec-ch-ua",
+  "sec-ch-ua-mobile",
+  "sec-ch-ua-platform",
+  "x-deepseek-identity",
+  "x-dsh-identity",
+  "x-app-identity",
+  "x-harness-identity",
+];
 
 function getRandomItem(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -100,9 +90,8 @@ export default {
       targetUrl.port = "443";
       targetUrl.protocol = "https:";
 
-      // Pilih UA dan fingerprint secara acak
-      const userAgent = getRandomItem(USER_AGENTS);
-      const chProfile = getRandomItem(CH_UA_PROFILES);
+      // Pilih identitas opencode CLI secara acak
+      const userAgent = getRandomItem(OPENCODE_USER_AGENTS);
 
       // Build headers baru -- bersih dari header asli yang bisa bocorkan identitas
       const newHeaders = new Headers();
@@ -121,22 +110,23 @@ export default {
       ];
 
       for (const [key, value] of request.headers.entries()) {
-        if (allowedHeaders.includes(key.toLowerCase())) {
+        const lower = key.toLowerCase();
+        if (BLOCKED_HEADERS.includes(lower)) continue;
+        if (allowedHeaders.includes(lower)) {
           newHeaders.set(key, value);
         }
       }
 
-      // Override dengan fingerprint yang di-rotasi
+      // Override dengan identitas opencode CLI
       newHeaders.set("User-Agent", userAgent);
       newHeaders.set("Host", TARGET_HOST);
       newHeaders.set("Origin", `https://${TARGET_HOST}`);
       newHeaders.set("Referer", `https://${TARGET_HOST}/`);
       newHeaders.set("Accept-Language", "en-US,en;q=0.9");
       newHeaders.set("Accept-Encoding", "gzip, deflate, br");
-
-      // Set Sec-CH-UA headers dari profile acak
-      for (const [k, v] of Object.entries(chProfile)) {
-        newHeaders.set(k, v);
+      // Pastikan tidak ada sisa fingerprint browser yang bocor
+      for (const h of ["Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform"]) {
+        newHeaders.delete(h);
       }
 
       // Buat request baru ke opencode.ai

@@ -3,7 +3,10 @@
 Cloudflare Worker proxy untuk OpenCode free provider.
 
 Mem-forward request ke `opencode.ai` dengan IP Cloudflare,
-rotasi User-Agent otomatis, dan support streaming SSE.
+identitas opencode CLI (`opencode/latest/<ver>/cli`), dan support streaming SSE.
+
+> Zen gateway hanya meloloskan free model untuk request ber-UA opencode CLI.
+> UA browser ditolak 429 `FreeUsageLimitError` — jadi worker ini TIDAK memakai UA browser.
 
 ## Endpoints yang di-proxy
 
@@ -35,8 +38,8 @@ https://opencode-proxy.SUBDOMAIN.workers.dev/zen/v1
 
 ## Fitur
 
-- Rotasi 8 User-Agent browser
-- Rotasi 5 Sec-CH-UA fingerprint profile
+- Rotasi identitas opencode CLI (`opencode/latest/<ver>/cli`, sinkron dengan release CLI terbaru)
+- Strip header identitas + fingerprint browser (Sec-CH-UA) yang memicu 429
 - Random jitter 0-50ms (bypass burst detection)
 - CORS support penuh
 - Streaming SSE support
