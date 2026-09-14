@@ -105,8 +105,15 @@ export default {
         "accept-language",
         "cache-control",
         "x-api-key",
+        "x-request-id",
         "anthropic-version",
         "openai-organization",
+        // Identitas sesi OpenCode — WAJIB diteruskan, tanpanya Zen gateway
+        // menolak free model dengan MissingSessionID.
+        "x-opencode-client",
+        "x-opencode-project",
+        "x-opencode-session",
+        "x-opencode-request",
       ];
 
       for (const [key, value] of request.headers.entries()) {
@@ -127,6 +134,21 @@ export default {
       // Pastikan tidak ada sisa fingerprint browser yang bocor
       for (const h of ["Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform"]) {
         newHeaders.delete(h);
+      }
+
+      // Injeksi identitas sesi OpenCode bila client tidak mengirimnya.
+      // Tanpa header ini Zen gateway menolak free model (MissingSessionID).
+      // session: stabil per isolate worker; request: unik per request.
+      if (!newHeaders.has("x-opencode-client")) newHeaders.set("x-opencode-client", "cli");
+      if (!newHeaders.has("x-opencode-project")) newHeaders.set("x-opencode-project", "default");
+      if (!newHeaders.has("x-opencode-session")) {
+        if (!globalThis.__opencodeSession) {
+          globalThis.__opencodeSession = crypto.randomUUID();
+        }
+        newHeaders.set("x-opencode-session", globalThis.__opencodeSession);
+      }
+      if (!newHeaders.has("x-opencode-request")) {
+        newHeaders.set("x-opencode-request", crypto.randomUUID());
       }
 
       // Buat request baru ke opencode.ai
